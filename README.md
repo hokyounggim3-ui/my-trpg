@@ -20,6 +20,32 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Deploy as a domain site
+
+Build and export the site as static files with:
+
+```bash
+npm run build
+```
+
+Then upload the generated `out` folder to your preferred domain hosting provider. If you use Vercel, the project is already configured with `vercel.json` and static export settings.
+
+### Deploy to Vercel
+
+1. Install the Vercel CLI if needed:
+
+```bash
+npm i -g vercel
+```
+
+2. Run deployment from the project root:
+
+```bash
+vercel --prod
+```
+
+3. Add your custom domain in the Vercel dashboard.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

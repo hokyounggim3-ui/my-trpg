@@ -5,8 +5,8 @@ import { useEffect, useMemo, useState } from "react";
 type Team = "ally" | "enemy";
 type BuiltinEffectType = "speed" | "damageTaken" | "damageDealt" | "stun";
 type EffectType = BuiltinEffectType | keyof Stats | string;
-type SkillKind = "damage" | "heal" | "buff";
-type SkillTarget = "enemy" | "ally" | "self" | "any";
+type SkillKind = "damage" | "heal" | "buff" | "penetration";
+type SkillTarget = "enemy" | "ally" | "self" | "any" | "enemyAll";
 
 type Stats = {
   str: number;
@@ -99,6 +99,13 @@ const effectTypeLabels: Record<string, string> = {
   con: "건강",
 };
 
+const skillKindLabels: Record<SkillKind, string> = {
+  damage: "피해",
+  penetration: "관통 피해",
+  heal: "회복",
+  buff: "버프",
+};
+
 const formulaTokenMap: Record<string, keyof Stats | "hp" | "maxHp" | "targethp" | "targetmaxhp"> = {
   str: "str",
   int: "int",
@@ -179,6 +186,30 @@ const defaultSkills: Skill[] = [
     currentCooldown: 0,
     effectType: "none",
     description: "근력 기반 피해 스킬",
+    weaponId: "",
+  },
+  {
+    id: makeId(),
+    name: "관통의 일격",
+    target: "enemy",
+    kind: "penetration",
+    formula: "[str] * 2 + 10",
+    cooldown: 2,
+    currentCooldown: 0,
+    effectType: "none",
+    description: "버프/디버프 영향을 받지 않는 고정 피해",
+    weaponId: "",
+  },
+  {
+    id: makeId(),
+    name: "붕괴의 파동",
+    target: "enemyAll",
+    kind: "damage",
+    formula: "[str] * 2 + 6",
+    cooldown: 3,
+    currentCooldown: 0,
+    effectType: "none",
+    description: "적 전체에게 피해를 나눠 입힙니다",
     weaponId: "",
   },
   {
@@ -324,6 +355,8 @@ export default function Page() {
   const [newEffect, setNewEffect] = useState(defaultNewEffect);
   const [newEffectTypeChoice, setNewEffectTypeChoice] = useState<EffectType | "custom">("speed");
   const [newEffectCustomType, setNewEffectCustomType] = useState("");
+  const [selectedEffectUnitId, setSelectedEffectUnitId] = useState<string>(defaultUnits[0]?.id ?? "");
+  const [selectedEffectId, setSelectedEffectId] = useState<string>("new");
   const [selectedEditableUnitId, setSelectedEditableUnitId] = useState<string>(defaultUnits[0]?.id ?? "");
   const [selectedJobId, setSelectedJobId] = useState<string>(defaultJobs[0]?.id ?? "");
   const [jobSkillToAddId, setJobSkillToAddId] = useState<string>(defaultSkills[0]?.id ?? "");
@@ -439,8 +472,11 @@ export default function Page() {
         acc: stats.acc + (passiveTotals.acc ?? 0),
         con: stats.con + (passiveTotals.con ?? 0),
       };
-      const effectiveSpeed = Math.floor(
-        (unit.speed + (passiveTotals.speed ?? 0) + (weaponBonusStats.speed ?? 0)) * (1 + speedPercent / 100)
+      const effectiveSpeed = Math.max(
+        0,
+        Math.floor(
+          (unit.speed + (passiveTotals.speed ?? 0) + (weaponBonusStats.speed ?? 0)) * (1 + speedPercent / 100)
+        )
       );
       const isStunned = unit.effects.some((effect) => effect.type === "stun");
       return {
@@ -513,6 +549,47 @@ export default function Page() {
       )
     );
   };
+
+  const selectedEffectUnit = useMemo(
+    () => units.find((unit) => unit.id === selectedEffectUnitId),
+    [units, selectedEffectUnitId]
+  );
+
+  const selectedEffect = useMemo(
+    () => selectedEffectUnit?.effects.find((effect) => effect.id === selectedEffectId),
+    [selectedEffectUnit, selectedEffectId]
+  );
+
+  useEffect(() => {
+    if (selectedEffect) {
+      setNewEffect({
+        name: selectedEffect.name,
+        type: selectedEffect.type,
+        value: selectedEffect.value,
+        flatValue: selectedEffect.flatValue,
+        remainingTurns: selectedEffect.remainingTurns,
+      });
+      if (["speed", "damageDealt", "damageTaken", "stun", "str", "int", "wis", "dex", "acc", "con"].includes(selectedEffect.type as string)) {
+        setNewEffectTypeChoice(selectedEffect.type as EffectType);
+        setNewEffectCustomType("");
+      } else {
+        setNewEffectTypeChoice("custom");
+        setNewEffectCustomType(selectedEffect.type as string);
+      }
+    } else {
+      setNewEffect(defaultNewEffect);
+      setNewEffectTypeChoice("speed");
+      setNewEffectCustomType("");
+    }
+  }, [selectedEffect]);
+
+  useEffect(() => {
+    if (!selectedEffectUnit) {
+      setSelectedEffectId("new");
+    } else if (selectedEffectId !== "new" && !selectedEffectUnit.effects.some((effect) => effect.id === selectedEffectId)) {
+      setSelectedEffectId("new");
+    }
+  }, [selectedEffectUnit, selectedEffectId]);
 
   const addUnit = (team: Team) => {
     const nextName = `${team === "ally" ? "아군" : "적"}${units.filter((unit) => unit.team === team).length + 1}`;
@@ -750,15 +827,43 @@ export default function Page() {
       (sum, effect) => (effect.type === "damageTaken" ? sum + (effect.flatValue ?? 0) : sum),
       0
     );
-    const amount = Math.max(
+    const baseAmount = Math.max(
       0,
       Math.floor((rawValue + outgoingFlat + incomingFlat) * outgoingMultiplier * incomingMultiplier)
     );
+    const amount = skill.kind === "penetration"
+      ? Math.max(0, Math.floor(rawValue))
+      : baseAmount;
+
+    const enemyTargetIds = skill.target === "enemyAll"
+      ? units.filter((unit) => unit.hp > 0 && unit.team !== source.team).map((unit) => unit.id)
+      : [];
+    const splitAmount = skill.target === "enemyAll" && enemyTargetIds.length > 0
+      ? Math.floor(amount / enemyTargetIds.length)
+      : amount;
+    const remainder = skill.target === "enemyAll"
+      ? amount - splitAmount * enemyTargetIds.length
+      : 0;
 
     setUnits((currentUnits) =>
       currentUnits.map((unit) => {
+        if (unit.id === source.id && (skill.kind === "damage" || skill.kind === "penetration")) {
+          return unit;
+        }
+
+        if (skill.target === "enemyAll" && enemyTargetIds.includes(unit.id)) {
+          const index = enemyTargetIds.indexOf(unit.id);
+          const appliedAmount = splitAmount + (index < remainder ? 1 : 0);
+          if (skill.kind === "damage" || skill.kind === "penetration") {
+            return { ...unit, hp: clamp(unit.hp - appliedAmount, 0, unit.maxHp) };
+          }
+        }
+
         if (unit.id === target.id) {
           if (skill.kind === "damage") {
+            return { ...unit, hp: clamp(unit.hp - amount, 0, unit.maxHp) };
+          }
+          if (skill.kind === "penetration") {
             return { ...unit, hp: clamp(unit.hp - amount, 0, unit.maxHp) };
           }
           if (skill.kind === "heal") {
@@ -842,11 +947,22 @@ export default function Page() {
 
   const selectedUnit = effectiveUnits.find((unit) => unit.id === activeUnitId);
   const editableUnit = effectiveUnits.find((unit) => unit.id === selectedEditableUnitId && unit.team === "ally");
-  const validTargets = units.filter((unit) => unit.hp > 0);
   const selectedSkillObj = skills.find((s) => s.id === actionState.selectedSkillId);
+  const validTargets = (() => {
+    if (!selectedSkillObj || !selectedUnit) return units.filter((unit) => unit.hp > 0);
+    const isDamageType = selectedSkillObj.kind === "damage" || selectedSkillObj.kind === "penetration";
+    const baseTargets = (() => {
+      if (selectedSkillObj.target === "self") return units.filter((unit) => unit.hp > 0 && unit.id === selectedUnit.id);
+      if (selectedSkillObj.target === "ally") return units.filter((unit) => unit.hp > 0 && unit.team === selectedUnit.team);
+      if (selectedSkillObj.target === "enemy" || selectedSkillObj.target === "enemyAll") return units.filter((unit) => unit.hp > 0 && unit.team !== selectedUnit.team);
+      return units.filter((unit) => unit.hp > 0);
+    })();
+    return isDamageType ? baseTargets.filter((unit) => unit.id !== selectedUnit.id) : baseTargets;
+  })();
   const hasValidTarget = (() => {
     if (!selectedSkillObj || !selectedUnit) return false;
     if (selectedSkillObj.target === "enemy") return units.some((u) => u.hp > 0 && u.team !== selectedUnit.team);
+    if (selectedSkillObj.target === "enemyAll") return units.some((u) => u.hp > 0 && u.team !== selectedUnit.team);
     if (selectedSkillObj.target === "ally") return units.some((u) => u.hp > 0 && u.team === selectedUnit.team);
     return true;
   })();
@@ -1029,9 +1145,14 @@ export default function Page() {
                               ) : (
                                 unitSkills.map((skillItem) => {
                                   const skillObj = skills.find((s) => s.id === skillItem.id) || skillItem;
-                                  const usable = skillObj.currentCooldown === 0 && unit.hp > 0 && (skillObj.target === "any" || skillObj.target === "self" || skillObj.target === "ally" || skillObj.target === "enemy");
+                                  const usable = skillObj.currentCooldown === 0 && unit.hp > 0 && (skillObj.target === "any" || skillObj.target === "self" || skillObj.target === "ally" || skillObj.target === "enemy" || skillObj.target === "enemyAll");
                                   const isSelected = actionState.selectedSkillId === skillObj.id;
-                                  const validTargetsForSkill = units.filter((u) => u.hp > 0 && (skillObj.target === "any" || (skillObj.target === "self" && u.id === unit.id) || (skillObj.target === "enemy" && u.team !== unit.team) || (skillObj.target === "ally" && u.team === unit.team)));
+                                  const validTargetsForSkill = units.filter((u) => u.hp > 0 && (
+                                    skillObj.target === "any" ||
+                                    (skillObj.target === "self" && u.id === unit.id) ||
+                                    ((skillObj.target === "enemy" || skillObj.target === "enemyAll") && u.team !== unit.team) ||
+                                    (skillObj.target === "ally" && u.team === unit.team)
+                                  ));
                                   return (
                                     <button
                                       key={skillObj.id}
@@ -1039,7 +1160,7 @@ export default function Page() {
                                       className={`w-full text-left rounded-2xl px-2 py-1 ${isSelected ? "ring-2 ring-sky-400" : ""} ${skillObj.currentCooldown > 0 ? "bg-slate-800 text-slate-500" : "bg-slate-950 text-slate-100"}`}
                                     >
                                       <div className="flex items-center justify-between">
-                                        <div>{skillObj.name}</div>
+                                        <div>{skillObj.name} ({skillKindLabels[skillObj.kind]})</div>
                                         <div className="text-xs text-slate-400">{skillObj.currentCooldown > 0 ? `쿨 ${skillObj.currentCooldown}` : "사용 가능"}</div>
                                       </div>
                                     </button>
@@ -1167,7 +1288,7 @@ export default function Page() {
                             )
                             .map((skill) => (
                               <option key={skill.id} value={skill.id}>
-                                {skill.name} ({skill.kind})
+                                {skill.name} ({skillKindLabels[skill.kind]})
                               </option>
                             ))}
                         </select>
@@ -1255,6 +1376,7 @@ export default function Page() {
                       className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none"
                     >
                       <option value="enemy">적</option>
+                      <option value="enemyAll">적 전체</option>
                       <option value="ally">아군</option>
                       <option value="self">자기</option>
                       <option value="any">모두</option>
@@ -1268,6 +1390,7 @@ export default function Page() {
                       className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none"
                     >
                       <option value="damage">피해</option>
+                      <option value="penetration">관통 피해</option>
                       <option value="heal">회복</option>
                       <option value="buff">버프</option>
                     </select>
@@ -1326,9 +1449,9 @@ export default function Page() {
                       className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none"
                     >
                       <option value="none">없음</option>
-                      <option value="speed">속도 증가</option>
+                      <option value="speed">속도</option>
                       <option value="damageDealt">피해 증가</option>
-                      <option value="damageTaken">받는 피해 증가</option>
+                      <option value="damageTaken">받는 피해</option>
                       <option value="stun">스턴</option>
                       <option value="str">근력</option>
                       <option value="int">지력</option>
@@ -1444,7 +1567,7 @@ export default function Page() {
                   <div key={skill.id} className="flex flex-wrap items-center justify-between gap-4 rounded-3xl border border-slate-800 bg-slate-900 px-4 py-3 text-sm">
                     <div>
                       <p className="font-semibold">{skill.name}</p>
-                      <p className="text-slate-400">{skill.kind} / {skill.effectType === "none" ? "효과 없음" : skill.effectType === "speed" ? "속도 버프" : skill.effectType === "damageDealt" ? "피해 증가" : skill.effectType === "damageTaken" ? "받는 피해 증가" : "스턴"}</p>
+                      <p className="text-slate-400">{skillKindLabels[skill.kind]} / {skill.effectType === "none" ? "효과 없음" : skill.effectType === "speed" ? "속도 효과" : skill.effectType === "damageDealt" ? "피해 증가" : skill.effectType === "damageTaken" ? "받는 피해 효과" : "스턴"}</p>
                     </div>
                     <button
                       onClick={() => removeSkill(skill.id)}
@@ -1643,7 +1766,7 @@ export default function Page() {
                           <div key={skill.id} className="flex items-center justify-between gap-3 rounded-3xl border border-slate-800 bg-slate-900 px-3 py-3 text-sm">
                             <div>
                               <p className="font-semibold">{skill.name}</p>
-                              <p className="text-slate-400">{skill.kind}</p>
+                              <p className="text-slate-400">{skillKindLabels[skill.kind]}</p>
                             </div>
                             <button
                               onClick={() => removeSkillFromJob(selectedJobId, skill.id)}
@@ -1686,123 +1809,184 @@ export default function Page() {
 
             <div className="rounded-3xl border border-slate-700 bg-slate-900/80 p-6 shadow-xl shadow-slate-900/20">
               <h2 className="text-xl font-semibold">상태 이상 에디터</h2>
-              <div className="mt-4 space-y-4">
-                {effectiveUnits.map((unit) => (
-                  <div key={unit.id} className="rounded-3xl border border-slate-800 bg-slate-950/80 p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="font-semibold">{unit.name} ({unit.team === "ally" ? "아군" : "적"})</p>
-                      <div className="inline-flex items-center gap-2 rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-300">
-                        남은 효과: {unit.effects.length}
-                      </div>
+              <div className="mt-4 grid gap-4 xl:grid-cols-[280px_1fr]">
+                <div className="space-y-4">
+                  <label className="space-y-2 text-sm text-slate-200">
+                    대상 유닛 선택
+                    <select
+                      value={selectedEffectUnitId}
+                      onChange={(event) => {
+                        setSelectedEffectUnitId(event.target.value);
+                        setSelectedEffectId("new");
+                      }}
+                      className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none"
+                    >
+                      {units.map((unit) => (
+                        <option key={unit.id} value={unit.id}>
+                          {unit.name} ({unit.team === "ally" ? "아군" : "적"})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div className="rounded-3xl border border-slate-800 bg-slate-950/80 p-4">
+                    <div className="flex items-center justify-between">
+                      <p className="font-semibold text-slate-100">효과 목록</p>
+                      <span className="text-xs text-slate-400">{selectedEffectUnit?.effects.length ?? 0}개</span>
                     </div>
-                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                      <label className="space-y-2 text-sm text-slate-200">
-                        효과 이름
-                        <input
-                          value={newEffect.name}
-                          onChange={(event) => setNewEffect((prev) => ({ ...prev, name: event.target.value }))}
-                          className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none"
-                        />
-                      </label>
-                      <label className="space-y-2 text-sm text-slate-200">
-                        유형
-                        <select
-                          value={newEffectTypeChoice}
-                          onChange={(event) => {
-                            const value = event.target.value as EffectType | "custom";
-                            setNewEffectTypeChoice(value);
-                            if (value === "custom") {
-                              setNewEffect((prev) => ({ ...prev, type: newEffectCustomType || "custom" }));
-                            } else {
-                              setNewEffect((prev) => ({ ...prev, type: value }));
-                            }
-                          }}
-                          className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none"
-                        >
-                          <option value="speed">속도 증가</option>
-                          <option value="damageDealt">입히는 피해 증가</option>
-                          <option value="damageTaken">받는 피해 증가</option>
-                          <option value="stun">스턴</option>
-                          <option value="str">근력</option>
-                          <option value="int">지력</option>
-                          <option value="wis">지혜</option>
-                          <option value="dex">민첩</option>
-                          <option value="acc">정밀</option>
-                          <option value="con">건강</option>
-                          <option value="custom">커스텀</option>
-                        </select>
-                        {newEffectTypeChoice === "custom" && (
-                          <input
-                            value={newEffectCustomType}
-                            onChange={(event) => {
-                              setNewEffectCustomType(event.target.value);
-                              setNewEffect((prev) => ({ ...prev, type: event.target.value || "custom" }));
-                            }}
-                            placeholder="예: 침묵, 화상"
-                            className="mt-2 w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none"
-                          />
-                        )}
-                      </label>
-                    </div>
-                    <div className="grid gap-3 sm:grid-cols-4 mt-4">
-                      <label className="space-y-2 text-sm text-slate-200">
-                        백분율 값 (%)
-                        <input
-                          type="number"
-                          value={newEffect.value}
-                          onChange={(event) => setNewEffect((prev) => ({ ...prev, value: Number(event.target.value) }))}
-                          className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none"
-                        />
-                      </label>
-                      <label className="space-y-2 text-sm text-slate-200">
-                        일반 값
-                        <input
-                          type="number"
-                          value={newEffect.flatValue}
-                          onChange={(event) => setNewEffect((prev) => ({ ...prev, flatValue: Number(event.target.value) }))}
-                          className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none"
-                        />
-                      </label>
-                      <label className="space-y-2 text-sm text-slate-200">
-                        지속 턴
-                        <input
-                          type="number"
-                          min={1}
-                          value={newEffect.remainingTurns}
-                          onChange={(event) => setNewEffect((prev) => ({ ...prev, remainingTurns: clamp(Number(event.target.value), 1, 10) }))}
-                          className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none"
-                        />
-                      </label>
-                      <button
-                        onClick={() => addEffectToUnit(unit.id, newEffect)}
-                        className="h-full rounded-3xl bg-yellow-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-yellow-400"
-                      >
-                        {unit.name}에 추가
-                      </button>
-                    </div>
-                    <div className="mt-4 space-y-2">
-                      {unit.effects.map((effect) => (
-                        <div key={effect.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-900 px-4 py-3 text-sm">
-                          <div>
+                    <div className="mt-3 space-y-2">
+                      {selectedEffectUnit?.effects.length ? (
+                        selectedEffectUnit.effects.map((effect) => (
+                          <button
+                            key={effect.id}
+                            onClick={() => setSelectedEffectId(effect.id)}
+                            className={`w-full rounded-2xl border px-3 py-3 text-left text-sm transition ${selectedEffectId === effect.id ? "border-sky-500 bg-slate-900" : "border-slate-700 bg-slate-950"}`}
+                          >
                             <div className="font-semibold">{effect.name}</div>
                             <div className="text-slate-400">
                               {effect.type === "stun"
                                 ? "스턴"
                                 : `${effectTypeLabels[effect.type] ?? effect.type} ${effect.value > 0 ? "+" : ""}${effect.value}%${effect.flatValue ? ` ${effect.flatValue > 0 ? "+" : ""}${effect.flatValue}` : ""}`}
-                              , {effect.remainingTurns}턴
                             </div>
-                          </div>
-                          <button
-                            onClick={() => removeEffectFromUnit(unit.id, effect.id)}
-                            className="rounded-full bg-slate-800 px-3 py-2 text-xs text-slate-200"
-                          >
-                            제거
                           </button>
+                        ))
+                      ) : (
+                        <div className="rounded-2xl border border-slate-700 bg-slate-900 px-4 py-6 text-center text-slate-500">
+                          선택된 유닛에 적용된 효과가 없습니다.
                         </div>
-                      ))}
+                      )}
                     </div>
                   </div>
-                ))}
+                </div>
+
+                <div className="rounded-3xl border border-slate-800 bg-slate-950/80 p-6">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="font-semibold text-slate-100">
+                        {selectedEffect ? "선택된 상태 효과 편집" : "새 상태 효과 추가"}
+                      </p>
+                      <p className="text-sm text-slate-400">
+                        {selectedEffect ? "효과를 선택한 뒤 값을 수정하고 저장하세요." : "새로운 상태 효과를 추가할 수 있습니다."}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setSelectedEffectId("new")}
+                      className="rounded-full border border-slate-700 bg-slate-900 px-4 py-2 text-xs font-semibold text-slate-100 transition hover:bg-slate-800"
+                    >
+                      새 효과로 초기화
+                    </button>
+                  </div>
+
+                  <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                    <label className="space-y-2 text-sm text-slate-200">
+                      효과 이름
+                      <input
+                        value={newEffect.name}
+                        onChange={(event) => setNewEffect((prev) => ({ ...prev, name: event.target.value }))}
+                        className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none"
+                      />
+                    </label>
+                    <label className="space-y-2 text-sm text-slate-200">
+                      유형
+                      <select
+                        value={newEffectTypeChoice}
+                        onChange={(event) => {
+                          const value = event.target.value as EffectType | "custom";
+                          setNewEffectTypeChoice(value);
+                          if (value === "custom") {
+                            setNewEffect((prev) => ({ ...prev, type: newEffectCustomType || "custom" }));
+                          } else {
+                            setNewEffect((prev) => ({ ...prev, type: value }));
+                          }
+                        }}
+                        className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none"
+                      >
+                        <option value="speed">속도</option>
+                        <option value="damageDealt">입히는 피해</option>
+                        <option value="damageTaken">받는 피해</option>
+                        <option value="stun">스턴</option>
+                        <option value="str">근력</option>
+                        <option value="int">지력</option>
+                        <option value="wis">지혜</option>
+                        <option value="dex">민첩</option>
+                        <option value="acc">정밀</option>
+                        <option value="con">건강</option>
+                        <option value="custom">커스텀</option>
+                      </select>
+                      {newEffectTypeChoice === "custom" && (
+                        <input
+                          value={newEffectCustomType}
+                          onChange={(event) => {
+                            setNewEffectCustomType(event.target.value);
+                            setNewEffect((prev) => ({ ...prev, type: event.target.value || "custom" }));
+                          }}
+                          placeholder="예: 침묵, 화상"
+                          className="mt-2 w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none"
+                        />
+                      )}
+                    </label>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-4 mt-4">
+                    <label className="space-y-2 text-sm text-slate-200">
+                      백분율 값 (%)
+                      <input
+                        type="number"
+                        value={newEffect.value}
+                        onChange={(event) => setNewEffect((prev) => ({ ...prev, value: Number(event.target.value) }))}
+                        className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none"
+                      />
+                      <p className="text-xs text-slate-500">음수 입력 시 감소 효과가 적용됩니다.</p>
+                    </label>
+                    <label className="space-y-2 text-sm text-slate-200">
+                      일반 값
+                      <input
+                        type="number"
+                        value={newEffect.flatValue}
+                        onChange={(event) => setNewEffect((prev) => ({ ...prev, flatValue: Number(event.target.value) }))}
+                        className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none"
+                      />
+                    </label>
+                    <label className="space-y-2 text-sm text-slate-200">
+                      지속 턴
+                      <input
+                        type="number"
+                        min={1}
+                        value={newEffect.remainingTurns}
+                        onChange={(event) => setNewEffect((prev) => ({ ...prev, remainingTurns: clamp(Number(event.target.value), 1, 10) }))}
+                        className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none"
+                      />
+                    </label>
+                    <div className="flex flex-col gap-3 sm:h-full">
+                      <button
+                        onClick={() => {
+                          if (!selectedEffectUnit) return;
+                          if (selectedEffect) {
+                            updateEffect(selectedEffectUnit.id, selectedEffect.id, newEffect);
+                          } else {
+                            addEffectToUnit(selectedEffectUnit.id, newEffect);
+                          }
+                          setSelectedEffectId("new");
+                        }}
+                        className="h-full rounded-3xl bg-sky-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-sky-400"
+                      >
+                        {selectedEffect ? "효과 갱신" : "추가"}
+                      </button>
+                      {selectedEffect ? (
+                        <button
+                          onClick={() => {
+                            if (!selectedEffectUnit || !selectedEffect) return;
+                            removeEffectFromUnit(selectedEffectUnit.id, selectedEffect.id);
+                            setSelectedEffectId("new");
+                          }}
+                          className="h-full rounded-3xl bg-rose-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-rose-400"
+                        >
+                          제거
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
